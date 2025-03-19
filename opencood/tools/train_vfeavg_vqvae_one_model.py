@@ -1,5 +1,7 @@
 """
-最原始的train脚本，仅修改成适配环境可以允许，未做代码逻辑的修改
+将point pillar中vfe模块的pfn网络修改成平均（也可以直接32*10，命名上以avg统称）后，训练vqvae模型
+但训练时不分开调用原来的heal模型（提取point pillar的feature）和vqvae模型（训练vqvae），而是将vqvae模型集成在原先的heal模型中
+loss可以下降（最开始会先上升）
 """
 
 import argparse
@@ -61,7 +63,33 @@ def main():
 
     print('Creating Model')
     model = train_utils.create_model(hypes)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # # 查看模型的所有子模块
+    # for name, module in model.named_children():
+    #     print(f"Module name: {name}")
+    #     print(f"Module structure: {module}")
+    #     print("------------------------")
+
+    # lcj change
+    # 设置使用第二块GPU (索引为1)
+    torch.cuda.set_device(0)
+    print(f"Using GPU with ID: {torch.cuda.current_device()}")
+
+    # 指定设备
+    device = torch.device(f"cuda:{torch.cuda.current_device()}")
+    
+    # 将模型移到指定设备
+    model = model.to(device)
+    
+    # 确保数据在正确设备上
+    def to_device(batch_data):
+        if isinstance(batch_data, dict):
+            return {k: to_device(v) for k, v in batch_data.items()}
+        elif isinstance(batch_data, list):
+            return [to_device(v) for v in batch_data]
+        elif isinstance(batch_data, torch.Tensor):
+            return batch_data.to(device)
+        return batch_data
     
     # record lowest validation loss checkpoint.
     lowest_val_loss = 1e5
@@ -90,10 +118,6 @@ def main():
         saved_path = train_utils.setup_train(hypes)
         scheduler = train_utils.setup_lr_schedular(hypes, optimizer)
 
-    # we assume gpu is necessary
-    if torch.cuda.is_available():
-        model.to(device)
-        
     # record training
     writer = SummaryWriter(saved_path)
 
@@ -116,22 +140,42 @@ def main():
                 continue
             model.zero_grad()
             optimizer.zero_grad()
-            batch_data = train_utils.to_device(batch_data, device)
+            batch_data = to_device(batch_data)
             batch_data['ego']['epoch'] = epoch
             ouput_dict = model(batch_data['ego'])
-            
-            final_loss = criterion(ouput_dict, batch_data['ego']['label_dict'])
-            criterion.logging(epoch, i, len(train_loader), writer)
 
-            if supervise_single_flag:
-                final_loss += criterion(ouput_dict, batch_data['ego']['label_dict_single'], suffix="_single") * hypes['train_params'].get("single_weight", 1)
-                criterion.logging(epoch, i, len(train_loader), writer, suffix="_single")
+            # lcj change
+            vqvae_training_mode = False
+            if 'model' in hypes and 'args' in hypes['model']:
+                model_args = hypes['model']['args']
+                if 'vqvae_params' in model_args and model_args['vqvae_params']['vqvae_training'] == True:
+                    vqvae_training_mode = True
+            if vqvae_training_mode:
+                # final_loss = criterion(ouput_dict, batch_data['ego']['label_dict'])
+                # criterion.logging(epoch, i, len(train_loader), writer)
+                # final_loss += ouput_dict['vq_loss']
+                final_loss = ouput_dict['vq_loss']
+                writer.add_scalar('Training/VQ_Loss', final_loss.item(), 
+                    epoch * len(train_loader) + i)
+                # 记录详细的损失组成
+                if 'recon_loss' in ouput_dict:
+                    writer.add_scalar('Training/Reconstruction_Loss', 
+                                    ouput_dict['recon_loss'].item(),
+                                    epoch * len(train_loader) + i)
+                print(f'At epoch {epoch} iter {i}, VQ loss: {final_loss.item():.8f}')
+            else:
+                final_loss = criterion(ouput_dict, batch_data['ego']['label_dict'])
+                criterion.logging(epoch, i, len(train_loader), writer)
+
+                if supervise_single_flag:
+                    final_loss += criterion(ouput_dict, batch_data['ego']['label_dict_single'], suffix="_single") * hypes['train_params'].get("single_weight", 1)
+                    criterion.logging(epoch, i, len(train_loader), writer, suffix="_single")
 
             # back-propagation
             final_loss.backward()
             optimizer.step()
 
-            # torch.cuda.empty_cache()  # it will destroy memory buffer
+            torch.cuda.empty_cache()  # it will destroy memory buffer
 
         if epoch % hypes['train_params']['save_freq'] == 0:
             torch.save(model.state_dict(),
@@ -149,13 +193,19 @@ def main():
                     optimizer.zero_grad()
                     model.eval()
 
-                    batch_data = train_utils.to_device(batch_data, device)
+                    batch_data = to_device(batch_data)
                     batch_data['ego']['epoch'] = epoch
                     ouput_dict = model(batch_data['ego'])
+                    
+                    # lcj change
+                    if vqvae_training_mode:
+                        final_loss = ouput_dict['vq_loss']
+                        print(f'val vq_loss {final_loss:.8f}')
 
-                    final_loss = criterion(ouput_dict,
+                    else:
+                        final_loss = criterion(ouput_dict,
                                            batch_data['ego']['label_dict'])
-                    print(f'val loss {final_loss:.3f}')
+                        print(f'val loss {final_loss:.3f}')
                     valid_ave_loss.append(final_loss.item())
 
             valid_ave_loss = statistics.mean(valid_ave_loss)

@@ -9,6 +9,8 @@ import numpy as np
 from opencood.models.sub_modules.lss_submodule import Up, CamEncode, BevEncode, CamEncode_Resnet101
 from opencood.utils.camera_utils import gen_dx_bx, cumsum_trick, QuickCumsum, depth_discretization
 from opencood.models.sub_modules.pillar_vfe import PillarVFE
+from opencood.models.sub_modules.pillar_vfe_vfe2avg import PillarVFEVFE2Avg
+from opencood.models.sub_modules.pillar_vfe_vfe3_3 import PillarVFEVFENine
 from opencood.models.sub_modules.point_pillar_scatter import PointPillarScatter
 from opencood.models.sub_modules.base_bev_backbone_resnet import ResNetBEVBackbone
 from opencood.models.sub_modules.base_bev_backbone import BaseBEVBackbone
@@ -90,13 +92,18 @@ class LiftSplatShoot(nn.Module):
                                 self.grid_conf['zbound'],
                                 )  # 划分网格
 
-        self.dx = dx.clone().detach().requires_grad_(False).to(torch.device("cuda"))  # [0.4,0.4,20]
-        self.bx = bx.clone().detach().requires_grad_(False).to(torch.device("cuda"))  # [-49.8,-49.8,0]
-        self.nx = nx.clone().detach().requires_grad_(False).to(torch.device("cuda"))  # [250,250,1]
+        # lcj change
+        # 获取当前设备
+        self.device = torch.device(f"cuda:{torch.cuda.current_device()}")
+        
+        # 修改张量创建时的设备指定
+        self.dx = dx.clone().detach().requires_grad_(False).to(self.device)
+        self.bx = bx.clone().detach().requires_grad_(False).to(self.device)
+        self.nx = nx.clone().detach().requires_grad_(False).to(self.device)
         self.depth_supervision = args['depth_supervision']
         self.downsample = args['img_downsample']  # 下采样倍数
         self.camC = args['img_features']  # 图像特征维度
-        self.frustum = self.create_frustum().clone().detach().requires_grad_(False).to(torch.device("cuda"))  # frustum: DxfHxfWx3(41x8x16x3)
+        self.frustum = self.create_frustum().clone().detach().requires_grad_(False).to(self.device)  # frustum: DxfHxfWx3(41x8x16x3)
         self.use_quickcumsum = True
         self.D, _, _, _ = self.frustum.shape  # D: 41
         self.camera_encoder_type = args['camera_encoder']
@@ -299,3 +306,64 @@ class LiftSplatShootVoxel(LiftSplatShoot):
         #final = torch.max(final.unbind(dim=2), 1)[0]  # 消除掉z维
         final = torch.max(final, 2)[0]  # 消除掉z维
         return final  # final: 4 x 64 x 240 x 240  # B, C, H, W 
+    
+
+class PointPillarVFE2Avg(nn.Module):
+    def __init__(self, args):
+        super(PointPillarVFE2Avg, self).__init__()
+        grid_size = (np.array(args['lidar_range'][3:6]) - np.array(args['lidar_range'][0:3])) / \
+                            np.array(args['voxel_size'])
+        grid_size = np.round(grid_size).astype(np.int64)
+        args['point_pillar_scatter']['grid_size'] = grid_size
+
+        # PIllar VFE
+        self.pillar_vfe = PillarVFEVFE2Avg(args['pillar_vfe'],
+                                    num_point_features=4,
+                                    voxel_size=args['voxel_size'],
+                                    point_cloud_range=args['lidar_range'])
+        self.scatter = PointPillarScatter(args['point_pillar_scatter'])
+
+
+    def forward(self, data_dict, modality_name):
+        voxel_features = data_dict[f'inputs_{modality_name}']['voxel_features']
+        voxel_coords = data_dict[f'inputs_{modality_name}']['voxel_coords']
+        voxel_num_points = data_dict[f'inputs_{modality_name}']['voxel_num_points']
+    
+        batch_dict = {'voxel_features': voxel_features,
+                      'voxel_coords': voxel_coords,
+                      'voxel_num_points': voxel_num_points}
+
+        batch_dict = self.pillar_vfe(batch_dict)
+        batch_dict = self.scatter(batch_dict)
+        lidar_feature_2d = batch_dict['spatial_features'] # H0, W0
+        return lidar_feature_2d
+    
+class PointPillarVFE33(nn.Module):
+    def __init__(self, args):
+        super(PointPillarVFE33, self).__init__()
+        grid_size = (np.array(args['lidar_range'][3:6]) - np.array(args['lidar_range'][0:3])) / \
+                            np.array(args['voxel_size'])
+        grid_size = np.round(grid_size).astype(np.int64)
+        args['point_pillar_scatter']['grid_size'] = grid_size
+
+        # PIllar VFE
+        self.pillar_vfe = PillarVFEVFENine(args['pillar_vfe'],
+                                    num_point_features=4,
+                                    voxel_size=args['voxel_size'],
+                                    point_cloud_range=args['lidar_range'])
+        self.scatter = PointPillarScatter(args['point_pillar_scatter'])
+
+
+    def forward(self, data_dict, modality_name):
+        voxel_features = data_dict[f'inputs_{modality_name}']['voxel_features']
+        voxel_coords = data_dict[f'inputs_{modality_name}']['voxel_coords']
+        voxel_num_points = data_dict[f'inputs_{modality_name}']['voxel_num_points']
+    
+        batch_dict = {'voxel_features': voxel_features,
+                      'voxel_coords': voxel_coords,
+                      'voxel_num_points': voxel_num_points}
+
+        batch_dict = self.pillar_vfe(batch_dict)
+        batch_dict = self.scatter(batch_dict)
+        lidar_feature_2d = batch_dict['spatial_features'] # H0, W0
+        return lidar_feature_2d

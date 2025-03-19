@@ -1,6 +1,6 @@
-"""
-最原始的train脚本，仅修改成适配环境可以允许，未做代码逻辑的修改
-"""
+# -*- coding: utf-8 -*-
+# Author: Yifan Lu <yifan_lu@sjtu.edu.cn>
+# License: TDG-Attribution-NonCommercial-NoDistrib
 
 import argparse
 import os
@@ -16,6 +16,7 @@ from tensorboardX import SummaryWriter
 import opencood.hypes_yaml.yaml_utils as yaml_utils
 from opencood.tools import train_utils
 from opencood.data_utils.datasets import build_dataset
+from opencood.models.vq_vae import VQVAE
 
 from icecream import ic
 
@@ -61,7 +62,35 @@ def main():
 
     print('Creating Model')
     model = train_utils.create_model(hypes)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    vqvae_model = VQVAE(in_channels=64, embedding_dim=256, num_embeddings=256, num_res_blocks=4)
+    
+
+    # # 查看模型的所有子模块
+    # for name, module in model.named_children():
+    #     print(f"Module name: {name}")
+    #     print(f"Module structure: {module}")
+    #     print("------------------------")
+
+    # lcj change
+    # 设置使用第二块GPU (索引为1)
+    torch.cuda.set_device(1)
+    print(f"Using GPU with ID: {torch.cuda.current_device()}")
+
+    # 指定设备
+    device = torch.device(f"cuda:{torch.cuda.current_device()}")
+    
+    # 将模型移到指定设备
+    model = model.to(device)
+    vqvae_model = vqvae_model.to(device)
+    # 确保数据在正确设备上
+    def to_device(batch_data):
+        if isinstance(batch_data, dict):
+            return {k: to_device(v) for k, v in batch_data.items()}
+        elif isinstance(batch_data, list):
+            return [to_device(v) for v in batch_data]
+        elif isinstance(batch_data, torch.Tensor):
+            return batch_data.to(device)
+        return batch_data
     
     # record lowest validation loss checkpoint.
     lowest_val_loss = 1e5
@@ -90,10 +119,6 @@ def main():
         saved_path = train_utils.setup_train(hypes)
         scheduler = train_utils.setup_lr_schedular(hypes, optimizer)
 
-    # we assume gpu is necessary
-    if torch.cuda.is_available():
-        model.to(device)
-        
     # record training
     writer = SummaryWriter(saved_path)
 
@@ -116,64 +141,43 @@ def main():
                 continue
             model.zero_grad()
             optimizer.zero_grad()
-            batch_data = train_utils.to_device(batch_data, device)
+            batch_data = to_device(batch_data)
             batch_data['ego']['epoch'] = epoch
-            ouput_dict = model(batch_data['ego'])
-            
-            final_loss = criterion(ouput_dict, batch_data['ego']['label_dict'])
-            criterion.logging(epoch, i, len(train_loader), writer)
+            with torch.no_grad():
+                # ouput_dict, vqvae_feature = model(batch_data['ego'])
+                vqvae_feature = model.encoder_m1(batch_data['ego'],'m1')     
 
-            if supervise_single_flag:
-                final_loss += criterion(ouput_dict, batch_data['ego']['label_dict_single'], suffix="_single") * hypes['train_params'].get("single_weight", 1)
-                criterion.logging(epoch, i, len(train_loader), writer, suffix="_single")
+                # 添加归一化操作
+                # 方法1：使用 min-max 归一化
+                # vqvae_feature_min = vqvae_feature.min()
+                # vqvae_feature_max = vqvae_feature.max()
+                # vqvae_feature = (vqvae_feature - vqvae_feature_min) / (vqvae_feature_max - vqvae_feature_min)
+                
+                # 或者方法2：使用 z-score 标准化
+                # mean = vqvae_feature.mean()
+                # std = vqvae_feature.std()
+                # vqvae_feature = (vqvae_feature - mean) / std 
+
+            recon, loss, recon_loss = vqvae_model(vqvae_feature)
+            vq_loss = loss - recon_loss
+
+            writer.add_scalar('Loss/step/total', loss.item(), i)
+            writer.add_scalar('Loss/step/reconstruction', recon_loss.item(), i)
+            writer.add_scalar('Loss/step/vq', vq_loss.item(), i)
+
+            final_loss = loss
+            print(f'At epoch {epoch} iter {i}, final VQ loss: {final_loss.item():.8f}')
 
             # back-propagation
             final_loss.backward()
             optimizer.step()
 
-            # torch.cuda.empty_cache()  # it will destroy memory buffer
+            torch.cuda.empty_cache()  # it will destroy memory buffer
 
         if epoch % hypes['train_params']['save_freq'] == 0:
-            torch.save(model.state_dict(),
+            torch.save(vqvae_model.state_dict(),
                        os.path.join(saved_path,
-                                    'net_epoch%d.pth' % (epoch + 1)))
-
-        if epoch % hypes['train_params']['eval_freq'] == 0:
-            valid_ave_loss = []
-
-            with torch.no_grad():
-                for i, batch_data in enumerate(val_loader):
-                    if batch_data is None:
-                        continue
-                    model.zero_grad()
-                    optimizer.zero_grad()
-                    model.eval()
-
-                    batch_data = train_utils.to_device(batch_data, device)
-                    batch_data['ego']['epoch'] = epoch
-                    ouput_dict = model(batch_data['ego'])
-
-                    final_loss = criterion(ouput_dict,
-                                           batch_data['ego']['label_dict'])
-                    print(f'val loss {final_loss:.3f}')
-                    valid_ave_loss.append(final_loss.item())
-
-            valid_ave_loss = statistics.mean(valid_ave_loss)
-            print('At epoch %d, the validation loss is %f' % (epoch,
-                                                              valid_ave_loss))
-            writer.add_scalar('Validate_Loss', valid_ave_loss, epoch)
-
-            # lowest val loss
-            if valid_ave_loss < lowest_val_loss:
-                lowest_val_loss = valid_ave_loss
-                torch.save(model.state_dict(),
-                       os.path.join(saved_path,
-                                    'net_epoch_bestval_at%d.pth' % (epoch + 1)))
-                if lowest_val_epoch != -1 and os.path.exists(os.path.join(saved_path,
-                                    'net_epoch_bestval_at%d.pth' % (lowest_val_epoch))):
-                    os.remove(os.path.join(saved_path,
-                                    'net_epoch_bestval_at%d.pth' % (lowest_val_epoch)))
-                lowest_val_epoch = epoch + 1
+                                    'vqvae_net_epoch%d.pth' % (epoch + 1)))    
 
         scheduler.step(epoch)
 

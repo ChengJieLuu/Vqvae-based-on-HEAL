@@ -16,6 +16,10 @@ For Intermediate Fusion, we will switch to IntermediateHeterinferFusionDataset
 
 import argparse
 import os
+
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 import time
 from typing import OrderedDict
 import importlib
@@ -100,7 +104,6 @@ def main():
         hypes = parser_func(hypes)
 
         
-    
     hypes['validate_dir'] = hypes['test_dir']
     if "OPV2V" in hypes['test_dir'] or "v2xsim" in hypes['test_dir']:
         assert "test" in hypes['validate_dir']

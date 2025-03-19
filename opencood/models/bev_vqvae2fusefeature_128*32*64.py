@@ -1,0 +1,88 @@
+""" Author: Chengjie Lu
+
+因为使用的是张丰谦师弟的原始bev特征，所以在进行vqvae重构后，需要将重构后的特征调整到后续网络的深层尺寸
+这里还是最初的通道变深尺寸变小，因此是128*32*64
+
+使用时将命名中的后缀尺寸去掉
+
+"""
+
+import torch.nn as nn
+
+class VQVAEFeatureProcessor(nn.Module):
+    def __init__(self, in_channels=128, out_channels=256):
+        super(VQVAEFeatureProcessor, self).__init__()
+        
+        # 初始特征提取
+        self.init_conv = nn.Sequential(
+            nn.Conv2d(in_channels, 192, kernel_size=3, padding=1),
+            nn.BatchNorm2d(192),
+            nn.ReLU(inplace=True)
+        )
+        
+        # 第一次上采样块
+        self.up_block1 = UpBlock(192, 192)  # 32x64 -> 64x128
+        
+        # 第二次上采样块
+        self.up_block2 = UpBlock(192, 256)  # 64x128 -> 128x256
+        
+        # 最终调整
+        self.final_conv = nn.Sequential(
+            nn.Conv2d(256, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+        
+    def forward(self, x):
+        # x: [batch, 128, 32, 64]
+        
+        # 初始特征提取
+        x = self.init_conv(x)  # [batch, 192, 32, 64]
+        
+        # 两次上采样
+        x = self.up_block1(x)  # [batch, 192, 64, 128]
+        x = self.up_block2(x)  # [batch, 256, 128, 256]
+        
+        # 最终调整
+        out = self.final_conv(x)  # [batch, 256, 128, 256]
+        
+        return out
+
+class UpBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(UpBlock, self).__init__()
+        
+        self.upsample = nn.Sequential(
+            # 上采样
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+            # 卷积调整特征
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            # 残差结构
+            ResidualBlock(out_channels)
+        )
+        
+    def forward(self, x):
+        return self.upsample(x)
+
+class ResidualBlock(nn.Module):
+    def __init__(self, channels):
+        super(ResidualBlock, self).__init__()
+        
+        self.conv_block = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(channels)
+        )
+        
+        self.relu = nn.ReLU(inplace=True)
+        
+    def forward(self, x):
+        identity = x
+        out = self.conv_block(x)
+        out += identity
+        out = self.relu(out)
+        return out

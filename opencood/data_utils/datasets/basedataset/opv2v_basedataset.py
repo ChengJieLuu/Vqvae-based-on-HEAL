@@ -85,6 +85,11 @@ class OPV2VBaseDataset(Dataset):
         self.scenario_database = OrderedDict()
         self.len_record = []
 
+        # lcj change
+        # remove the scenario folder that has three cameras
+        if '/datasets/OPV2V/train/2021_09_09_13_20_58' in self.scenario_folders:
+            self.scenario_folders.remove('/datasets/OPV2V/train/2021_09_09_13_20_58')
+
         # loop over all scenarios
         for (i, scenario_folder) in enumerate(self.scenario_folders):
             self.scenario_database.update({i: OrderedDict()})
