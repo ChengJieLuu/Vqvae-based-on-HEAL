@@ -70,13 +70,8 @@ def main():
     #     print(f"Module structure: {module}")
     #     print("------------------------")
 
-    # lcj change
-    # 设置使用第二块GPU (索引为1)
-    torch.cuda.set_device(0)
-    print(f"Using GPU with ID: {torch.cuda.current_device()}")
-
     # 指定设备
-    device = torch.device(f"cuda:{torch.cuda.current_device()}")
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     
     # 将模型移到指定设备
     model = model.to(device)
@@ -144,6 +139,10 @@ def main():
             batch_data['ego']['epoch'] = epoch
             ouput_dict = model(batch_data['ego'])
 
+            if i==0:    
+                dummy_input = torch.randn(1, 8, 256, 512).to(device)
+                writer.add_graph(model.vqvae_model, dummy_input)
+
             # lcj change
             vqvae_training_mode = False
             if 'model' in hypes and 'args' in hypes['model']:
@@ -155,12 +154,14 @@ def main():
                 # criterion.logging(epoch, i, len(train_loader), writer)
                 # final_loss += ouput_dict['vq_loss']
                 final_loss = ouput_dict['vq_loss']
-                writer.add_scalar('Training/VQ_Loss', final_loss.item(), 
+                writer.add_scalar('Training/Total_Loss', final_loss.item(), 
                     epoch * len(train_loader) + i)
                 # 记录详细的损失组成
                 if 'recon_loss' in ouput_dict:
                     writer.add_scalar('Training/Reconstruction_Loss', 
                                     ouput_dict['recon_loss'].item(),
+                                    epoch * len(train_loader) + i)
+                    writer.add_scalar('Training/VQ_Loss', ouput_dict['vq_loss']-ouput_dict['recon_loss'], 
                                     epoch * len(train_loader) + i)
                 print(f'At epoch {epoch} iter {i}, VQ loss: {final_loss.item():.8f}')
             else:

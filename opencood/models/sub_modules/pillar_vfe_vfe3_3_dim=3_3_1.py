@@ -1,7 +1,9 @@
 """ Author: Chengjie Lu
 
-将point pillar中vfe模块的质心坐标范数、点云方差、最大点间距离进一步修改，质心坐标范数改成相对质心坐标的偏移量并保留三维，添加有效点的个数作为新的一维
+将point pillar中vfe模块的质心坐标范数、点云方差、最大点间距离进一步修改，质心坐标范数改成相对质心坐标的偏移量，最大间距保留x,y,z三维
 这里处于point pillar的vfe模块
+
+这里为了方便调用直接将原文件名增加了_old后缀，自己使用其他模块可以直接调用的文件名
 
 """
 
@@ -197,30 +199,12 @@ class PillarVFEVFENine(nn.Module):
         # 获取每个柱体内的最大距离
         max_distances = torch.max(distances.view(distances.shape[0], -1), dim=1)[0].unsqueeze(-1)  # [M, 1]
         
-        # 将voxel_num_points转换为浮点数并增加维度 [M, 1]
-        points_count = voxel_num_points.float().unsqueeze(-1)
-        
-        # 拼接所有特征 [M, 8] (原来是[M, 7])
-        statistical_features = torch.cat([mean_relative_offsets, variance, max_distances, points_count], dim=1)
+        # 拼接所有特征 [M, 5]
+        statistical_features = torch.cat([mean_relative_offsets, variance, max_distances], dim=1)
         
         # 处理只有一个点的情况（方差和最大距离应为0）
         single_point_mask = (voxel_num_points == 1).unsqueeze(-1)  # [M, 1]
-        statistical_features[:, 1:4] = statistical_features[:, 1:4] * (~single_point_mask)  # 注意这里改为1:4，因为points_count不需要置零
-
-        # 添加归一化操作
-        # 方法1：使用 min-max 归一化
-        feature_min = statistical_features.min()
-        feature_max = statistical_features.max()
-        statistical_features = (statistical_features - feature_min) / (feature_max - feature_min)
-        statistical_features = statistical_features * 2 - 1
-        
-        # 或者方法2：使用 z-score 标准化
-        # mean = statistical_features.mean()
-        # std = statistical_features.std()
-        # statistical_features = (statistical_features - mean) / std
-        # statistical_features = statistical_features *2 -1
-
-
+        statistical_features[:, 1:] = statistical_features[:, 1:] * (~single_point_mask)
         
         # 将统计特征添加到batch_dict中
         batch_dict['pillar_features'] = statistical_features

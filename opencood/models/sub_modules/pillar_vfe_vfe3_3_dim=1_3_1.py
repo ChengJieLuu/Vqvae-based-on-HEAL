@@ -1,15 +1,15 @@
 """ Author: Chengjie Lu
 
-将point pillar中vfe模块的质心坐标范数、点云方差、最大点间距离进一步修改，质心坐标范数改成相对质心坐标的偏移量并保留三维，添加有效点的个数作为新的一维
+将point pillar中vfe模块的pfn网络修改成罗老师提供的点云簇的特征，包括质心坐标范数、点云方差、最大点间距离
 这里处于point pillar的vfe模块
+
+使用时将后缀_old删去，便为其他模块调用的文件名
 
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import matplotlib.pyplot as plt
-import numpy as np
 
 
 class PFNLayer(nn.Module):
@@ -97,60 +97,6 @@ class PillarVFEVFENine(nn.Module):
         paddings_indicator = actual_num.int() > max_num
         return paddings_indicator
 
-    def analyze_features(self, statistical_features):
-        """分析特征的统计分布
-        Args:
-            statistical_features: [M, 7] tensor, 包含相对偏移[0:3]，方差[3:6]，最大距离[6]
-        """
-        # 转换为numpy进行分析
-        features = statistical_features.detach().cpu().numpy()
-        
-        # 创建子图
-        fig, axes = plt.subplots(3, 1, figsize=(10, 15))
-        
-        # 1. 分析相对偏移量
-        offsets = features[:, :3]
-        axes[0].boxplot([offsets[:, i] for i in range(3)], labels=['x', 'y', 'z'])
-        axes[0].set_title('Relative Offsets Distribution')
-        axes[0].set_ylabel('Offset Value')
-        
-        # 2. 分析方差
-        vars = features[:, 3:6]
-        axes[1].boxplot([vars[:, i] for i in range(3)], labels=['x', 'y', 'z'])
-        axes[1].set_title('Variance Distribution')
-        axes[1].set_ylabel('Variance Value')
-        
-        # 3. 分析最大距离
-        max_dist = features[:, 6]
-        axes[2].hist(max_dist, bins=50)
-        axes[2].set_title('Max Distance Distribution')
-        axes[2].set_xlabel('Distance')
-        axes[2].set_ylabel('Count')
-        
-        # 打印基本统计信息
-        print("\nFeature Statistics:")
-        print("\nRelative Offsets (x, y, z):")
-        print(f"Mean: {np.mean(offsets, axis=0)}")
-        print(f"Std: {np.std(offsets, axis=0)}")
-        print(f"Min: {np.min(offsets, axis=0)}")
-        print(f"Max: {np.max(offsets, axis=0)}")
-        
-        print("\nVariance (x, y, z):")
-        print(f"Mean: {np.mean(vars, axis=0)}")
-        print(f"Std: {np.std(vars, axis=0)}")
-        print(f"Min: {np.min(vars, axis=0)}")
-        print(f"Max: {np.max(vars, axis=0)}")
-        
-        print("\nMax Distance:")
-        print(f"Mean: {np.mean(max_dist)}")
-        print(f"Std: {np.std(max_dist)}")
-        print(f"Min: {np.min(max_dist)}")
-        print(f"Max: {np.max(max_dist)}")
-        
-        plt.tight_layout()
-        plt.savefig('feature_analysis.png')
-        plt.close()
-
     def forward(self, batch_dict):
         voxel_features, voxel_num_points, coords = \
             batch_dict['voxel_features'], batch_dict['voxel_num_points'], \
@@ -165,16 +111,10 @@ class PillarVFEVFENine(nn.Module):
         # 使用mask获取有效点的xyz坐标 [M, 32, 3]
         valid_points = voxel_features[:, :, :3] * points_mask.float()
         
-        # 1. 计算相对于质心的平均偏移量 [M, 3]
-        # 首先计算质心
+        # 1. 计算质心坐标范数 C [M, 1]
+        # 使用sum和voxel_num_points计算平均值，避免无效点的影响
         points_mean = valid_points.sum(dim=1) / voxel_num_points.unsqueeze(-1).float()  # [M, 3]
-        
-        # 计算每个点到质心的相对偏移
-        relative_offsets = valid_points - points_mean.unsqueeze(1)  # [M, 32, 3]
-        
-        # 计算有效点的平均相对偏移（使用mask确保只考虑有效点）
-        mean_relative_offsets = (relative_offsets * points_mask.float()).sum(dim=1) / \
-                               voxel_num_points.unsqueeze(-1).float()  # [M, 3]
+        C = torch.norm(points_mean, dim=1, keepdim=True)  # [M, 1]
         
         # 2. 计算点云方差 Variance [M, 3]
         # 广播减法计算每个点到均值的差
@@ -197,36 +137,14 @@ class PillarVFEVFENine(nn.Module):
         # 获取每个柱体内的最大距离
         max_distances = torch.max(distances.view(distances.shape[0], -1), dim=1)[0].unsqueeze(-1)  # [M, 1]
         
-        # 将voxel_num_points转换为浮点数并增加维度 [M, 1]
-        points_count = voxel_num_points.float().unsqueeze(-1)
-        
-        # 拼接所有特征 [M, 8] (原来是[M, 7])
-        statistical_features = torch.cat([mean_relative_offsets, variance, max_distances, points_count], dim=1)
+        # 拼接所有特征 [M, 5]
+        statistical_features = torch.cat([C, variance, max_distances], dim=1)
         
         # 处理只有一个点的情况（方差和最大距离应为0）
         single_point_mask = (voxel_num_points == 1).unsqueeze(-1)  # [M, 1]
-        statistical_features[:, 1:4] = statistical_features[:, 1:4] * (~single_point_mask)  # 注意这里改为1:4，因为points_count不需要置零
-
-        # 添加归一化操作
-        # 方法1：使用 min-max 归一化
-        feature_min = statistical_features.min()
-        feature_max = statistical_features.max()
-        statistical_features = (statistical_features - feature_min) / (feature_max - feature_min)
-        statistical_features = statistical_features * 2 - 1
-        
-        # 或者方法2：使用 z-score 标准化
-        # mean = statistical_features.mean()
-        # std = statistical_features.std()
-        # statistical_features = (statistical_features - mean) / std
-        # statistical_features = statistical_features *2 -1
-
-
+        statistical_features[:, 1:] = statistical_features[:, 1:] * (~single_point_mask)
         
         # 将统计特征添加到batch_dict中
         batch_dict['pillar_features'] = statistical_features
-        
-        # 在返回之前添加分析
-        if False:  # 可以选择只在训练时分析
-            self.analyze_features(statistical_features)
         
         return batch_dict

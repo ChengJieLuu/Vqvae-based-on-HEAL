@@ -56,7 +56,8 @@ def main():
         # opt.note += "_16ch"
 
         x_min, x_max = -eval(opt.range.split(',')[0]), eval(opt.range.split(',')[0])
-        y_min, y_max = -eval(opt.range.split(',')[1]), eval(opt.range.split(',')[1])
+        # y_min, y_max = -eval(opt.range.split(',')[1]), eval(opt.range.split(',')[1])
+        y_min, y_max = -eval(opt.range.split(',')[1])/2, eval(opt.range.split(',')[1])/2
         opt.note += f"_{x_max}_{y_max}"
 
         new_cav_range = [x_min, y_min, hypes['postprocess']['anchor_args']['cav_lidar_range'][2], \

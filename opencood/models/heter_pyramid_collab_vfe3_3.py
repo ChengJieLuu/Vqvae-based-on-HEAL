@@ -18,6 +18,7 @@ from opencood.utils.transformation_utils import normalize_pairwise_tfm
 from opencood.utils.model_utils import check_trainable_module, fix_bn, unfix_bn
 import importlib
 import torchvision
+import math
 
 class HeterPyramidCollabVFE33(nn.Module):
     def __init__(self, args):
@@ -78,7 +79,7 @@ class HeterPyramidCollabVFE33(nn.Module):
                 }
 
         """for vfe33:change feature dim size from 5 to 64"""
-        self.avg_conv = nn.Conv2d(5, 64, kernel_size=1)
+        self.avg_conv = nn.Conv2d(8, 64, kernel_size=1)
 
 
         """For feature transformation"""
@@ -135,6 +136,35 @@ class HeterPyramidCollabVFE33(nn.Module):
             for p in self.compressor.parameters():
                 p.requires_grad_(True)
 
+    def positionalencoding2d(self,d_model, height, width):
+        """
+        生成二维位置编码
+        :param d_model: 特征通道数 (8)
+        :param height: 特征图高度 (256)
+        :param width: 特征图宽度 (512)
+        :return: [d_model, height, width]
+        """
+        if d_model % 4 != 0:
+            raise ValueError("Cannot use sin/cos positional encoding with "
+                            "odd dimension (got dim={:d})".format(d_model))
+        pe = torch.zeros(d_model, height, width)
+        # 每个维度使用一半的通道
+        d_model = int(d_model / 2)
+        div_term = torch.exp(torch.arange(0., d_model, 2) *
+                            -(math.log(10000.0) / d_model))
+        pos_w = torch.arange(0., width).unsqueeze(1)
+        pos_h = torch.arange(0., height).unsqueeze(1)
+        
+        # 编码宽度方向
+        pe[0:d_model:2, :, :] = torch.sin(pos_w * div_term).transpose(0, 1).unsqueeze(1).repeat(1, height, 1)
+        pe[1:d_model:2, :, :] = torch.cos(pos_w * div_term).transpose(0, 1).unsqueeze(1).repeat(1, height, 1)
+        
+        # 编码高度方向
+        pe[d_model::2, :, :] = torch.sin(pos_h * div_term).transpose(0, 1).unsqueeze(2).repeat(1, 1, width)
+        pe[d_model+1::2, :, :] = torch.cos(pos_h * div_term).transpose(0, 1).unsqueeze(2).repeat(1, 1, width)
+        
+        return pe
+
     def forward(self, data_dict):
         output_dict = {'pyramid': 'collab'}
         agent_modality_list = data_dict['agent_modality_list'] 
@@ -148,6 +178,12 @@ class HeterPyramidCollabVFE33(nn.Module):
             if modality_name not in modality_count_dict:
                 continue
             feature = eval(f"self.encoder_{modality_name}")(data_dict, modality_name)
+
+            # 添加位置编码
+            pe = self.positionalencoding2d(8, 256, 512).to(feature.device)
+            pe = pe.unsqueeze(0).repeat(feature.shape[0], 1, 1, 1)
+            feature = feature + pe
+
             feature = self.avg_conv(feature)
             feature = eval(f"self.backbone_{modality_name}")({"spatial_features": feature})['spatial_features_2d']
             feature = eval(f"self.aligner_{modality_name}")(feature)

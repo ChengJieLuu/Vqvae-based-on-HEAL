@@ -1,7 +1,6 @@
 """ Author: Chengjie Lu
 
-bilibili教程视频介绍的vqvae实现，与cursor给出的一致
-_old后缀同样是标记，使用时需要去掉才能被其它模块引用
+github上找到的cifar10数据集的vqvae实现
 
 """
 
@@ -54,59 +53,97 @@ class VectorQuantizer(nn.Module):
         return quantized, loss
 
 class ResBlock(nn.Module):
-    def __init__(self, channels, bottleneck_ratio=4):
+    def __init__(self, channels, bottleneck_ratio=1):
         super().__init__()
         bottleneck_channels = channels // bottleneck_ratio
-        
-        self.conv1 = nn.Conv2d(channels, bottleneck_channels, 1)
-        self.bn1 = nn.BatchNorm2d(bottleneck_channels)
-        self.conv2 = nn.Conv2d(bottleneck_channels, bottleneck_channels, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(bottleneck_channels)
-        self.conv3 = nn.Conv2d(bottleneck_channels, channels, 1)
-        self.bn3 = nn.BatchNorm2d(channels)
-        
+
         self.relu = nn.ReLU(inplace=True)
+        self.conv1 = nn.Conv2d(channels, bottleneck_channels, 3)
+        self.relu1 = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(bottleneck_channels, bottleneck_channels, 1)
+        self.relu2 = nn.ReLU(inplace=True)
+        
+
         
     def forward(self, x):
         identity = x
         
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-        
+        out = self.relu1(x)
+        out = self.conv1(out)
+
+        out = self.relu2(out)  
         out = self.conv2(out)
-        out = self.bn2(out)
-        out = self.relu(out)
-        
-        out = self.conv3(out)
-        out = self.bn3(out)
+
         
         out += identity
         out = self.relu(out)
         
         return out
+    
+class ResidualStack(nn.Module):
+    def __init__(self, num_hiddens, num_residual_layers, num_residual_hiddens):
+        super().__init__()
+        # See Section 4.1 of "Neural Discrete Representation Learning".
+        layers = []
+        for i in range(num_residual_layers):
+            layers.append(
+                nn.Sequential(
+                    nn.ReLU(),
+                    nn.Conv2d(
+                        in_channels=num_hiddens,
+                        out_channels=num_residual_hiddens,
+                        kernel_size=3,
+                        padding=1,
+                    ),
+                    nn.ReLU(),
+                    nn.Conv2d(
+                        in_channels=num_residual_hiddens,
+                        out_channels=num_hiddens,
+                        kernel_size=1,
+                    ),
+                )
+            )
+
+        self.layers = nn.ModuleList(layers)
+
+    def forward(self, x):
+        h = x
+        for layer in self.layers:
+            h = h + layer(h)
+
+        # ResNet V1-style.
+        return torch.relu(h)
 
 class VQVAE(nn.Module):
-    def __init__(self, in_channels, embedding_dim=256, num_embeddings=1024, num_res_blocks=4):
+    def __init__(self, in_channels, embedding_dim=256, hidden_dim=512 ,num_embeddings=1024, num_res_blocks=4):
         super().__init__()
         self.embedding_dim = embedding_dim
         
         # 编码器
         encoder_layers = [
             # 初始特征提取 [B,3,256,512] -> [B,128,128,256]
-            nn.Conv2d(in_channels, 512, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(512),
+            nn.Conv2d(in_channels, hidden_dim // 2, kernel_size=4, stride=2, padding=1),
+            # nn.BatchNorm2d(512),
             nn.ReLU(inplace=True),
             
             # 增加通道数到embedding_dim [B,128,128,256] -> [B,256,128,256]
-            nn.Conv2d(512, embedding_dim, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(embedding_dim),
+            nn.Conv2d(hidden_dim // 2, hidden_dim, kernel_size=3, stride=1, padding=1),
+            # nn.BatchNorm2d(embedding_dim),
             nn.ReLU(inplace=True),
+
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, stride=1, padding=1),
         ]
         
         # 添加残差块
+        residual_hiddens_ratio = 4
         for _ in range(num_res_blocks):
-            encoder_layers.append(ResBlock(embedding_dim))
+            encoder_layers.append(ResidualStack(
+            hidden_dim, num_res_blocks, hidden_dim // residual_hiddens_ratio
+        ))
+            
+        encoder_layers.append(nn.BatchNorm2d(hidden_dim))
+        encoder_layers.append(nn.Conv2d(hidden_dim, embedding_dim, kernel_size=3, stride=1, padding=1))
+
         
         self.encoder = nn.Sequential(*encoder_layers)
         
@@ -117,25 +154,23 @@ class VQVAE(nn.Module):
         # 解码器
         decoder_layers = [
             # 初始特征处理
-            nn.Conv2d(embedding_dim, embedding_dim, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(embedding_dim),
-            nn.ReLU(inplace=True),
+            nn.Conv2d(embedding_dim, hidden_dim, kernel_size=3, stride=1, padding=1),
         ]
         
         # 添加残差块
         for _ in range(num_res_blocks):
-            decoder_layers.append(ResBlock(embedding_dim))
+            decoder_layers.append( ResidualStack(
+            hidden_dim, num_res_blocks, hidden_dim // residual_hiddens_ratio
+        ))
             
         # 最终输出层
         decoder_layers.extend([
             # 通道数调整 [B,256,128,256] -> [B,128,128,256]
-            nn.Conv2d(embedding_dim, 512, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(512),
+            nn.Conv2d(hidden_dim, hidden_dim // 2, kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True),
             
             # 上采样恢复原始尺寸 [B,128,128,256] -> [B,3,256,512]
-            nn.ConvTranspose2d(512, in_channels, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(in_channels)
+            nn.ConvTranspose2d(hidden_dim // 2, in_channels, kernel_size=4, stride=2, padding=1),
         ])
         
         self.decoder = nn.Sequential(*decoder_layers)

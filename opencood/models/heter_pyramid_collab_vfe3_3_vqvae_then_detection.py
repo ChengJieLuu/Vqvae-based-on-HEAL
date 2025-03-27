@@ -1,9 +1,10 @@
 """ Author: Chengjie Lu
 
-将point pillar中vfe模块的pfn网络修改成罗老师提供的点云簇的特征，包括质心坐标范数、点云方差、最大点间距离
-不使用下游检测头单纯训练vqvae模型时调用的模型类
+将point pillar中vfe模块的质心坐标范数、点云方差、最大点间距离进一步修改，质心坐标范数改成相对质心坐标的偏移量并保留三维，添加有效点的个数作为新的一维
+训练好vqvae模型后，使用下游检测头训练时调用的模型类
 
 支持归一化操作，但并未使用，模型收敛效果较差
+使用了相对位置编码
 
 """
 
@@ -24,9 +25,9 @@ import torchvision
 from opencood.models.vq_vae import VQVAE
 import math
 
-class HeterPyramidCollabVFE33VQVAE(nn.Module):
+class HeterPyramidCollabVFE33VQVAEThenDetection(nn.Module):
     def __init__(self, args):
-        super(HeterPyramidCollabVFE33VQVAE, self).__init__()
+        super(HeterPyramidCollabVFE33VQVAEThenDetection, self).__init__()
         self.args = args
         modality_name_list = list(args.keys())
         modality_name_list = [x for x in modality_name_list if x.startswith("m") and x[1:].isdigit()] 
@@ -84,6 +85,13 @@ class HeterPyramidCollabVFE33VQVAE(nn.Module):
 
         """for vfe33:change feature dim size from 5 to 64"""
         self.avg_conv = nn.Conv2d(5, 64, kernel_size=1)
+        self.avg_conv_32 = nn.Conv2d(32, 64, kernel_size=1)
+        self.up_conv_32 = nn.ConvTranspose2d(32, 64, kernel_size=2, stride=2)
+        self.avg_conv_64 = nn.Conv2d(64, 64, kernel_size=1)
+        self.avg_conv_128 = nn.Conv2d(128, 64, kernel_size=1)
+        self.avg_conv_256 = nn.Conv2d(256, 64, kernel_size=1)
+        self.avg_conv_512 = nn.Conv2d(512, 64, kernel_size=1)
+
 
 
         """For feature transformation"""
@@ -107,8 +115,17 @@ class HeterPyramidCollabVFE33VQVAE(nn.Module):
             self.shrink_conv = DownsampleConv(args['shrink_header'])
 
         self.vqvae_model = VQVAE(in_channels=8, embedding_dim=512, num_embeddings=1024, num_res_blocks=4)
-        # self.vqvae_model = VQVAE(in_channels=8, embedding_dim=256, hidden_dim=512, num_embeddings=1024, num_res_blocks=2)
-        # print(self.vqvae_model)
+        # self.vqvae_model = VQVAE(in_channels=8, embedding_dim=256, hidden_dim=512, num_embeddings=1024, num_res_blocks=4)
+
+        """
+        Shared Heads
+        """
+        self.cls_head = nn.Conv2d(args['in_head'], args['anchor_number'],
+                                  kernel_size=1)
+        self.reg_head = nn.Conv2d(args['in_head'], 7 * args['anchor_number'],
+                                  kernel_size=1)
+        self.dir_head = nn.Conv2d(args['in_head'], args['dir_args']['num_bins'] * args['anchor_number'],
+                                  kernel_size=1) # BIN_NUM = 2
         
         # compressor will be only trainable
         self.compress = False
@@ -176,7 +193,6 @@ class HeterPyramidCollabVFE33VQVAE(nn.Module):
             if modality_name not in modality_count_dict:
                 continue
             feature = eval(f"self.encoder_{modality_name}")(data_dict, modality_name)
-            # print(feature.max(), feature.min())
 
             # 添加归一化操作
             # 方法1：使用 min-max 归一化
@@ -227,10 +243,53 @@ class HeterPyramidCollabVFE33VQVAE(nn.Module):
 
         heter_feature_2d = torch.stack(heter_feature_2d_list)
 
-        output_dict.update({'vqvae_feature': heter_feature_2d})
-        # print(heter_feature_2d.max(), heter_feature_2d.min())
-        recon, loss, recon_loss = self.vqvae_model(heter_feature_2d)
-        output_dict.update({'reconstructed_feature': recon})
-        output_dict.update({'vq_loss': loss})
-        output_dict.update({'recon_loss': recon_loss})
+        with torch.set_grad_enabled(False):
+            # 使用encoder部分获取特征
+            z = self.vqvae_model.encoder(heter_feature_2d)
+            # 通过VQ层获取量化特征
+            z_q, _ = self.vqvae_model.vq(z)
+            vqvae_quantized_feature = z_q
+
+
+        # 添加位置编码
+        # pe = self.positionalencoding2d(32, 128, 256).to(vqvae_quantized_feature.device)
+        # pe = pe.unsqueeze(0).repeat(vqvae_quantized_feature.shape[0], 1, 1, 1)
+        # vqvae_quantized_feature = vqvae_quantized_feature + pe
+
+        feature = vqvae_quantized_feature
+        with torch.set_grad_enabled(True):
+            feature = self.avg_conv_512(feature)
+
+
+            # feature = self.up_conv_32(feature)
+            #原始的resnet backbone会下采样，为了尺寸不变这里不用
+            # feature = eval(f"self.backbone_{modality_name}")({"spatial_features": feature})['spatial_features_2d']
+            # feature = eval(f"self.aligner_{modality_name}")(feature)
+
+        heter_feature_2d = feature
+        # Pyramid backbone处理 - 在两个阶段都需要更新
+        with torch.set_grad_enabled(True):  # 始终启用梯度
+            fused_feature, occ_outputs = self.pyramid_backbone.forward_collab(
+                heter_feature_2d,
+                record_len, 
+                affine_matrix, 
+                agent_modality_list, 
+                self.cam_crop_info
+            )
+
+            if self.shrink_flag:
+                fused_feature = self.shrink_conv(fused_feature)
+
+        # 检测头处理 - 只在检测头训练时更新
+        with torch.set_grad_enabled(True):
+            cls_preds = self.cls_head(fused_feature)
+            reg_preds = self.reg_head(fused_feature)
+            dir_preds = self.dir_head(fused_feature)
+
+            output_dict.update({
+                'cls_preds': cls_preds,
+                'reg_preds': reg_preds,
+                'dir_preds': dir_preds,
+                'occ_single_list': occ_outputs
+            })
         return output_dict

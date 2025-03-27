@@ -61,7 +61,8 @@ def main():
 
     print('Creating Model')
     model = train_utils.create_model(hypes)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     
     # record lowest validation loss checkpoint.
     lowest_val_loss = 1e5
