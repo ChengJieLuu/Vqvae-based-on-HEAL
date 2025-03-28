@@ -71,7 +71,7 @@ def main():
     #     print("------------------------")
 
     # 指定设备
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
     
     # 将模型移到指定设备
     model = model.to(device)
@@ -138,6 +138,11 @@ def main():
             batch_data = to_device(batch_data)
             batch_data['ego']['epoch'] = epoch
             ouput_dict = model(batch_data['ego'])
+
+            #排查数据是否有异常值
+            writer.add_scalar('Training/vqvae_feature_max', ouput_dict['vqvae_feature'].max(), epoch * len(train_loader) + i)
+            writer.add_scalar('Training/vqvae_feature_min', ouput_dict['vqvae_feature'].min(), epoch * len(train_loader) + i)
+            writer.add_scalar('Training/vqvae_feature_mean', ouput_dict['vqvae_feature'].mean(), epoch * len(train_loader) + i)
 
             if i==0:    
                 dummy_input = torch.randn(1, 8, 256, 512).to(device)

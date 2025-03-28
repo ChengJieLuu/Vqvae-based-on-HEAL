@@ -106,8 +106,8 @@ class HeterPyramidCollabVFE33VQVAE(nn.Module):
             self.shrink_flag = True
             self.shrink_conv = DownsampleConv(args['shrink_header'])
 
-        self.vqvae_model = VQVAE(in_channels=8, embedding_dim=512, num_embeddings=1024, num_res_blocks=4)
-        # self.vqvae_model = VQVAE(in_channels=8, embedding_dim=256, hidden_dim=512, num_embeddings=1024, num_res_blocks=2)
+        # self.vqvae_model = VQVAE(in_channels=8, embedding_dim=512, num_embeddings=1024, num_res_blocks=4)
+        self.vqvae_model = VQVAE(in_channels=8, embedding_dim=256, hidden_dim=512, num_embeddings=1024, num_res_blocks=2)
         # print(self.vqvae_model)
         
         # compressor will be only trainable
