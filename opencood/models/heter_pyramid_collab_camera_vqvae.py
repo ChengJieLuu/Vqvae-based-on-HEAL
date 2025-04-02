@@ -23,10 +23,12 @@ import importlib
 import torchvision
 from opencood.models.vq_vae import VQVAE
 import math
+import torchvision.utils as vutils
+import os
 
-class HeterPyramidCollabVFE33VQVAE(nn.Module):
+class HeterPyramidCollabCameraVQVAE(nn.Module):
     def __init__(self, args):
-        super(HeterPyramidCollabVFE33VQVAE, self).__init__()
+        super(HeterPyramidCollabCameraVQVAE, self).__init__()
         self.args = args
         modality_name_list = list(args.keys())
         modality_name_list = [x for x in modality_name_list if x.startswith("m") and x[1:].isdigit()] 
@@ -106,8 +108,8 @@ class HeterPyramidCollabVFE33VQVAE(nn.Module):
             self.shrink_flag = True
             self.shrink_conv = DownsampleConv(args['shrink_header'])
 
-        self.vqvae_model = VQVAE(in_channels=8, embedding_dim=256, hidden_dim=128, num_embeddings=1024, num_res_blocks=4)
-        # self.vqvae_model = VQVAE(in_channels=8, embedding_dim=256, hidden_dim=512, num_embeddings=1024, num_res_blocks=2)
+        # self.vqvae_model = VQVAE(in_channels=3, embedding_dim=64, hidden_dim=64, num_embeddings=512, num_res_blocks=4)
+        self.vqvae_model = VQVAE(in_channels=3, embedding_dim=64, hidden_dim=128, num_embeddings=512, num_res_blocks=2)
         # print(self.vqvae_model)
         
         # compressor will be only trainable
@@ -166,69 +168,83 @@ class HeterPyramidCollabVFE33VQVAE(nn.Module):
     def forward(self, data_dict):
         output_dict = {'pyramid': 'collab'}
         agent_modality_list = data_dict['agent_modality_list'] 
-        affine_matrix = normalize_pairwise_tfm(data_dict['pairwise_t_matrix'], self.H, self.W, self.fake_voxel_size)
-        record_len = data_dict['record_len'] 
-        # print(agent_modality_list)
         modality_count_dict = Counter(agent_modality_list)
         modality_feature_dict = {}
 
         for modality_name in self.modality_name_list:
             if modality_name not in modality_count_dict:
                 continue
-            feature = eval(f"self.encoder_{modality_name}")(data_dict, modality_name)
-            # print(feature.max(), feature.min())
-
-            # 添加归一化操作
-            # 方法1：使用 min-max 归一化
-            # feature_min = feature.min()
-            # feature_max = feature.max()
-            # feature = (feature - feature_min) / (feature_max - feature_min)
             
-            # 或者方法2：使用 z-score 标准化
-            # mean = vqvae_feature.mean()
-            # std = vqvae_feature.std()
-            # vqvae_feature = (vqvae_feature - mean) / std
+            image_inputs_dict = data_dict[f'inputs_{modality_name}']
+            x = image_inputs_dict['imgs']
+            
+            # 保存第一个batch的第一个视角的RGB图像
+            sample_img = x[0, 0, :3, :, :]  # [3, H, W]
+            
+            # 确保值在0-1之间
+            sample_img = (sample_img - sample_img.min()) / (sample_img.max() - sample_img.min())
+            
+            # 保存图像
+            # save_path = "debug_images"
+            # os.makedirs(save_path, exist_ok=True)
+            # vutils.save_image(sample_img, os.path.join(save_path, "sample_view.png"))
+            
+            # x的形状: [batch, n_views, channels, H, W]
+            batch_size, n_views = x.shape[0], x.shape[1]
+            
+            # 只取RGB通道，去掉深度通道
+            feature = x[..., :3, :, :]  # [batch, n_views, 3, H, W]
+            
+            # 遍历每个视角
+            view_features = []
+            for view_idx in range(n_views):
+                view_feature = feature[:, view_idx]  # [batch, 3, H, W]
+                
+                # 归一化操作
+                # feature_min = view_feature.min()
+                # feature_max = view_feature.max()
+                # view_feature = (view_feature - feature_min) / (feature_max - feature_min)
+                
+                # 添加位置编码
+                # pe = self.positionalencoding2d(3, 384, 512).to(view_feature.device)
+                # pe = pe.unsqueeze(0).repeat(batch_size, 1, 1, 1)
+                # view_feature = view_feature + pe
+                
+                view_features.append(view_feature)
+            
+            # 将所有视角的特征存储
+            modality_feature_dict[modality_name] = torch.stack(view_features, dim=1)  # [batch, n_views, 128, H, W]
 
-            # 添加位置编码
-            pe = self.positionalencoding2d(8, 256, 512).to(feature.device)
-            pe = pe.unsqueeze(0).repeat(feature.shape[0], 1, 1, 1)
-            feature = feature + pe
-
-            modality_feature_dict[modality_name] = feature
-
-        """
-        Crop/Padd camera feature map.
-        """
+        # Crop/Padd camera feature map
         for modality_name in self.modality_name_list:
             if modality_name in modality_count_dict:
                 if self.sensor_type_dict[modality_name] == "camera":
-                    # should be padding. Instead of masking
                     feature = modality_feature_dict[modality_name]
-                    _, _, H, W = feature.shape
+                    _, _, _, H, W = feature.shape
                     target_H = int(H*eval(f"self.crop_ratio_H_{modality_name}"))
                     target_W = int(W*eval(f"self.crop_ratio_W_{modality_name}"))
 
+                    # 对每个视角进行裁剪
                     crop_func = torchvision.transforms.CenterCrop((target_H, target_W))
-                    modality_feature_dict[modality_name] = crop_func(feature)
-                    if eval(f"self.depth_supervision_{modality_name}"):
-                        output_dict.update({
-                            f"depth_items_{modality_name}": eval(f"self.encoder_{modality_name}").depth_items
-                        })
+                    cropped_features = []
+                    for view_idx in range(n_views):
+                        cropped_features.append(crop_func(feature[:, view_idx]))
+                    modality_feature_dict[modality_name] = torch.stack(cropped_features, dim=1)
 
-        """
-        Assemble heter features
-        """
+        # Assemble heter features
         counting_dict = {modality_name:0 for modality_name in self.modality_name_list}
         heter_feature_2d_list = []
+        
         for modality_name in agent_modality_list:
             feat_idx = counting_dict[modality_name]
-            heter_feature_2d_list.append(modality_feature_dict[modality_name][feat_idx])
+            # 遍历该模态的所有视角
+            for view_idx in range(n_views):
+                heter_feature_2d_list.append(modality_feature_dict[modality_name][feat_idx, view_idx])
             counting_dict[modality_name] += 1
 
         heter_feature_2d = torch.stack(heter_feature_2d_list)
 
         output_dict.update({'vqvae_feature': heter_feature_2d})
-        # print(heter_feature_2d.max(), heter_feature_2d.min())
         recon, loss, recon_loss = self.vqvae_model(heter_feature_2d)
         output_dict.update({'reconstructed_feature': recon})
         output_dict.update({'vq_loss': loss})

@@ -139,14 +139,14 @@ def main():
             batch_data['ego']['epoch'] = epoch
             ouput_dict = model(batch_data['ego'])
 
-            #排查数据是否有异常值
-            writer.add_scalar('Training/vqvae_feature_max', ouput_dict['vqvae_feature'].max(), epoch * len(train_loader) + i)
-            writer.add_scalar('Training/vqvae_feature_min', ouput_dict['vqvae_feature'].min(), epoch * len(train_loader) + i)
-            writer.add_scalar('Training/vqvae_feature_mean', ouput_dict['vqvae_feature'].mean(), epoch * len(train_loader) + i)
+            # #排查数据是否有异常值
+            # writer.add_scalar('Training/vqvae_feature_max', ouput_dict['vqvae_feature'].max(), epoch * len(train_loader) + i)
+            # writer.add_scalar('Training/vqvae_feature_min', ouput_dict['vqvae_feature'].min(), epoch * len(train_loader) + i)
+            # writer.add_scalar('Training/vqvae_feature_mean', ouput_dict['vqvae_feature'].mean(), epoch * len(train_loader) + i)
 
-            if i==0:    
-                dummy_input = torch.randn(1, 8, 256, 512).to(device)
-                writer.add_graph(model.vqvae_model, dummy_input)
+            # if i==0:    
+            #     dummy_input = torch.randn(1, 8, 256, 512).to(device)
+            #     writer.add_graph(model.vqvae_model, dummy_input)
 
             # lcj change
             vqvae_training_mode = False

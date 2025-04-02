@@ -166,3 +166,5 @@ opencood/tools/inference_w_noise_heter.py
 
 #lcj add
 logs_old
+debug_images
+variance.pth

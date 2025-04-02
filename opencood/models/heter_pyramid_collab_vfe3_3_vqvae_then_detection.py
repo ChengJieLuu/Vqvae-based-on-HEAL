@@ -114,7 +114,8 @@ class HeterPyramidCollabVFE33VQVAEThenDetection(nn.Module):
             self.shrink_flag = True
             self.shrink_conv = DownsampleConv(args['shrink_header'])
 
-        self.vqvae_model = VQVAE(in_channels=8, embedding_dim=512, num_embeddings=1024, num_res_blocks=4)
+        # self.vqvae_model = VQVAE(in_channels=8, embedding_dim=512, num_embeddings=1024, num_res_blocks=4)
+        self.vqvae_model = VQVAE(in_channels=8, embedding_dim=256, hidden_dim=128, num_embeddings=1024, num_res_blocks=4)
         # self.vqvae_model = VQVAE(in_channels=8, embedding_dim=256, hidden_dim=512, num_embeddings=1024, num_res_blocks=4)
 
         """
@@ -258,12 +259,9 @@ class HeterPyramidCollabVFE33VQVAEThenDetection(nn.Module):
 
         feature = vqvae_quantized_feature
         with torch.set_grad_enabled(True):
-            feature = self.avg_conv_512(feature)
-
-
-            # feature = self.up_conv_32(feature)
+            feature = self.avg_conv_256(feature)
             #原始的resnet backbone会下采样，为了尺寸不变这里不用
-            # feature = eval(f"self.backbone_{modality_name}")({"spatial_features": feature})['spatial_features_2d']
+            feature = eval(f"self.backbone_{modality_name}")({"spatial_features": feature})['spatial_features_2d']
             # feature = eval(f"self.aligner_{modality_name}")(feature)
 
         heter_feature_2d = feature

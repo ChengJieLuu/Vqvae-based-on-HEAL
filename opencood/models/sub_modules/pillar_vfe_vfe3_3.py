@@ -202,6 +202,20 @@ class PillarVFEVFENine(nn.Module):
         
         # 拼接所有特征 [M, 8] (原来是[M, 7])
         statistical_features = torch.cat([mean_relative_offsets, variance, max_distances, points_count], dim=1)
+
+        # 将voxel_num_points进行二值化 [M, 1]
+        # points_count = voxel_num_points.float()  # 首先转换为浮点数
+        # points_mask = (points_count > 10).float()  # 大于0的设为1，否则为0
+        # points_mask = points_mask.unsqueeze(-1)   # 增加维度 [M, 1]
+        # statistical_features = points_mask
+        # # 统计并打印1和0的数量
+        # num_ones = torch.sum(points_mask == 1.0).item()
+        # num_zeros = torch.sum(points_mask == 0.0).item()
+        # print(f"Number of ones (有点的位置): {num_ones}")
+        # print(f"Number of zeros (无点的位置): {num_zeros}")
+        # print(f"Total positions (总位置数): {num_ones + num_zeros}")
+        # print(f"Percentage of ones (有点位置占比): {(num_ones/(num_ones + num_zeros))*100:.2f}%")
+
         
         # 处理只有一个点的情况（方差和最大距离应为0）
         single_point_mask = (voxel_num_points == 1).unsqueeze(-1)  # [M, 1]
